@@ -1,9 +1,8 @@
-extern crate clap;
-use clap::{App, Arg, SubCommand};
+use clap::{App, Arg};
 fn main() {
     let matches = App::new("brainheck")
         .version("1.0")
-        .author("Garen Tyler <garentyler@gmail.com>")
+        .author("Garen Tyler <garentyler@garen.dev>")
         .about("A brainfuck interpreter written in Rust.")
         .arg(
             Arg::with_name("filename")
@@ -12,5 +11,6 @@ fn main() {
                 .index(1),
         )
         .get_matches();
-    brainheck::execute_file(matches.value_of("filename").unwrap());
+    let source = std::fs::read_to_string(matches.value_of("filename").unwrap()).unwrap();
+    brainheck::Program::interpret(&source, Box::new(std::io::stdin()), Box::new(std::io::stdout())).expect("Error interpreting program");
 }

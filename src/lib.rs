@@ -1,98 +1,193 @@
-const MEMORY_SIZE: usize = 30_000;
-pub fn execute_source(source: &str) {
-    let mut mem = [0u8; MEMORY_SIZE];
-    execute(source, 0, &mut mem);
+pub const MEMORY_SIZE: usize = 30_000;
+
+#[derive(Copy, Clone, PartialEq, Debug)]
+pub enum Token {
+    Increment,
+    Decrement,
+    MoveLeft,
+    MoveRight,
+    Input,
+    Output,
+    Debug,
+    LoopStart,
+    LoopEnd,
+    Unknown,
 }
-pub fn execute(source: &str, mut mem_ptr: usize, mem: &mut [u8; MEMORY_SIZE]) {
-    let mut source_ptr = 0;
-    let mut source_chars = source.chars().collect::<Vec<char>>();
-    let mut loop_stack: Vec<usize> = Vec::new();
-    while source_ptr < source_chars.len() {
-        match source_chars[source_ptr] {
-            '>' => {
-                if mem_ptr == MEMORY_SIZE - 1 {
-                    mem_ptr = 0;
-                } else {
-                    mem_ptr += 1;
-                }
-            }
-            '<' => {
-                if mem_ptr == 0 {
-                    mem_ptr = MEMORY_SIZE - 1;
-                } else {
-                    mem_ptr -= 1;
-                }
-            }
-            '+' => {
-                if mem[mem_ptr] == 255 {
-                    mem[mem_ptr] = 0;
-                } else {
-                    mem[mem_ptr] += 1;
-                }
-            }
-            '-' => {
-                if mem[mem_ptr] == 0 {
-                    mem[mem_ptr] = 255;
-                } else {
-                    mem[mem_ptr] -= 1;
-                }
-            }
-            ',' => {
-                mem[mem_ptr] = read_char() as u8;
-                // println!("\nread '{}'", mem[mem_ptr] as char);
-            }
-            '.' => {
-                print!("{}", mem[mem_ptr] as char);
-            }
-            'd' => {
-                print!("{}", mem[mem_ptr]);
-            }
-            '[' => {
-                loop_stack.push(source_ptr);
-            }
-            ']' => {
-                if mem[mem_ptr] != 0 {
-                    if loop_stack.len() > 0 {
-                        source_ptr = *loop_stack.last().unwrap();
-                    }
-                } else {
-                    let _ = loop_stack.pop();
-                }
-            }
-            _ => {}
+
+#[derive(PartialEq, Eq, Debug)]
+pub enum Operation {
+    Move(isize),
+    Add(isize),
+    Input,
+    Output,
+    Debug,
+    Loop(Vec<Operation>),
+}
+
+#[derive(Debug)]
+pub enum InterpreterError {
+    /// Error parsing source
+    ParseError(String),
+    /// Memory overflow
+    MemoryOverflow,
+    /// Pointer is out of memory bounds
+    PointerOverflow,
+    /// Error using stdio
+    StdioError(std::io::Error),
+}
+
+pub struct Program<'io> {
+    memory: [u8; MEMORY_SIZE],
+    pointer: usize,
+    stdin: Box<dyn std::io::Read + 'io>,
+    stdout: Box<dyn std::io::Write + 'io>,
+}
+impl<'io> Program<'io> {
+    fn new(stdin: Box<dyn std::io::Read + 'io>, stdout: Box<dyn std::io::Write + 'io>) -> Self {
+        Self {
+            memory: [0u8; MEMORY_SIZE],
+            pointer: 0,
+            stdin,
+            stdout,
         }
-        source_ptr += 1;
     }
-}
-pub fn execute_file(path: &str) {
-    execute_source(&read_file(path));
-}
-fn read_file(path: &str) -> String {
-    use std::io::Read;
-    use std::{env, fs::File, path::Path};
-    let mut file = File::open(&Path::new(path)).expect("could not open file");
-    let mut s = String::new();
-    file.read_to_string(&mut s)
-        .expect("could not read file to string");
-    s
-}
-fn read_char() -> char {
-    // https://stackoverflow.com/questions/26321592/how-can-i-read-one-character-from-stdin-without-having-to-hit-enter
-    extern crate termios;
-    use std::io;
-    use std::io::Read;
-    use std::io::Write;
-    use termios::{tcsetattr, Termios, ECHO, ICANON, TCSANOW};
-    let stdin = 0;
-    let termios = Termios::from_fd(stdin).unwrap();
-    let mut new_termios = termios.clone();
-    new_termios.c_lflag &= !(ICANON | ECHO);
-    tcsetattr(stdin, TCSANOW, &mut new_termios).unwrap();
-    let stdout = io::stdout();
-    let mut reader = io::stdin();
-    let mut buffer = [0; 1];
-    stdout.lock().flush().unwrap();
-    reader.read_exact(&mut buffer).unwrap();
-    tcsetattr(stdin, TCSANOW, &termios).unwrap();
-    buffer[0] as char
+    fn tokenize(source: &str) -> Result<Vec<Token>, InterpreterError> {
+        let tokens = source
+            .chars()
+            .map(|cur| match cur {
+                '>' => Token::MoveRight,
+                '<' => Token::MoveLeft,
+                '+' => Token::Increment,
+                '-' => Token::Decrement,
+                '.' => Token::Output,
+                ',' => Token::Input,
+                '[' => Token::LoopStart,
+                ']' => Token::LoopEnd,
+                '#' => Token::Debug,
+                _ => Token::Unknown,
+            })
+            .filter(|token| token.ne(&Token::Unknown))
+            .collect::<Vec<Token>>();
+        Ok(tokens)
+    }
+    fn parse(tokens: &[Token]) -> Result<Vec<Operation>, InterpreterError> {
+        use std::collections::LinkedList;
+        let mut stack: LinkedList<Vec<Operation>> = LinkedList::new();
+        stack.push_back(vec![]);
+        for token in tokens {
+            let current_operations = stack.back_mut().expect("Stack should not be empty!");
+            match token {
+                Token::Increment => {
+                    if let Some(Operation::Add(x)) = current_operations.last_mut() {
+                        *x += 1;
+                    } else {
+                        current_operations.push(Operation::Add(1))
+                    }
+                },
+                Token::Decrement => {
+                    if let Some(Operation::Add(x)) = current_operations.last_mut() {
+                        *x += -1;
+                    } else {
+                        current_operations.push(Operation::Add(-1))
+                    }
+                },
+                Token::MoveLeft => {
+                    if let Some(Operation::Move(x)) = current_operations.last_mut() {
+                        *x += -1;
+                    } else {
+                        current_operations.push(Operation::Move(-1))
+                    }
+                },
+                Token::MoveRight => {
+                    if let Some(Operation::Move(x)) = current_operations.last_mut() {
+                        *x += 1;
+                    } else {
+                        current_operations.push(Operation::Move(1))
+                    }
+                },
+                Token::Input => current_operations.push(Operation::Input),
+                Token::Output => current_operations.push(Operation::Output),
+                Token::Debug => current_operations.push(Operation::Debug),
+                Token::LoopStart => stack.push_back(vec![]),
+                Token::LoopEnd => {
+                    let current_operations = stack.pop_back().unwrap();
+                    let previous_operations = stack.back_mut().ok_or_else(|| {
+                        InterpreterError::ParseError(String::from("Unexpected end of loop"))
+                    })?;
+        
+                    previous_operations.push(Operation::Loop(current_operations))
+                },
+                Token::Unknown => {
+                    return Err(InterpreterError::ParseError(
+                        format!("Unexpected token {:?}", token)
+                    ));
+                },
+            }
+        }
+        let operations = stack.pop_back().unwrap();
+        if !stack.is_empty() {
+            Err(InterpreterError::ParseError("Expected end of loop".to_owned()))
+        } else {
+            Ok(operations)
+        }
+    }
+    fn execute(&mut self, operations: &[Operation]) -> Result<(), InterpreterError> {
+        for operation in operations {
+            match operation {
+                Operation::Add(n) => {
+                    let value = self.memory[self.pointer];
+                    // print!("add({}): {} -> ", n, value);
+                    self.memory[self.pointer] = ((value as isize + n) % 256) as u8;
+                    // println!("{}", self.memory[self.pointer]);
+                },
+                Operation::Move(n) => {
+                    // print!("move({}): {} -> ", n, self.pointer);
+                    self.pointer = (self.memory.len() as isize + self.pointer as isize + n) as usize % self.memory.len();
+                    // println!("{}", self.pointer);
+                },
+                Operation::Input => {
+                    let mut buf = [0u8];
+                    if let Err(err) = self.stdin.read(&mut buf) {
+                        return Err(InterpreterError::StdioError(err));
+                    }
+                    // println!("input: {}", buf[0]);
+                    self.memory[self.pointer] = buf[0];
+                },
+                Operation::Output => {
+                    // println!("output: {}", self.memory[self.pointer] as char);
+                    if let Err(err) = self.stdout.write_all(&[self.memory[self.pointer]]) {
+                        return Err(InterpreterError::StdioError(err))
+                    }
+                    if let Err(err) = self.stdout.flush() {
+                        return Err(InterpreterError::StdioError(err))
+                    }
+                },
+                Operation::Debug => {
+                    // // print the value as a string
+                    let value = format!("{}", self.memory[self.pointer]);
+                    // println!("debug: {}", value);
+                    if let Err(err) = self.stdout.write_all(value.as_bytes()) {
+                        return Err(InterpreterError::StdioError(err))
+                    }
+                    if let Err(err) = self.stdout.flush() {
+                        return Err(InterpreterError::StdioError(err))
+                    }
+                },
+                Operation::Loop(operations) => {
+                    // println!("loop start");
+                    while self.memory[self.pointer] != 0 {
+                        self.execute(operations)?;
+                        // println!("loop value: {}", self.memory[self.pointer]);
+                    }
+                    // println!("loop end");
+                },
+            }
+        }
+        Ok(())
+    }
+    pub fn interpret(source: &str, stdin: Box<dyn std::io::Read + 'io>, stdout: Box<dyn std::io::Write + 'io>) -> Result<(), InterpreterError> {
+        let tokens = Program::tokenize(&source).unwrap();
+        let operations = Program::parse(&tokens).unwrap();
+        Program::new(stdin, stdout).execute(&operations)
+    }
 }
